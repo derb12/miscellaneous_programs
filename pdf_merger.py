@@ -1,74 +1,180 @@
 # -*- coding: utf-8 -*-
-"""A GUI for selecting PDF files to merge into one file and save.
+"""A GUI for selecting files to merge into one PDF file and save.
+
+Can use the file formats natively supported by pymupdf (PDF, XPS, EPUB, HTML),
+as well as image formats (JPG, TIF, PNG, SVG, GIF, BMP) and text files.
 
 Also allows selecting the first page, last page, and rotation of each individual file
 and allows previewing the merged file before saving.
 
 @author: Donald Erb
-Created on 2021-02-04 14:56:34
+Created on 2021-02-04
 
 Requirements
 ------------
 fitz>=1.18.4
-    fitz is pymupdf; new versions have this_case rather than CamelCase or mixedCase.
+    fitz is pymupdf; versions after 1.18.4 have snake_case rather than
+    CamelCase or mixedCase.
 wx>=4.0
     wx is wxpython; v4.0 is the first to work with python v3.
 
-License:
---------
-This program is licensed under the GNU GPL V3+.
+License
+-------
+This program is licensed under the GNU AGPL V3+ license (GNU AFFERO GPL).
 
-The set_dpi_awareness function was copied from mcetl. The mcetl license is included below:
-
-BSD 3-Clause License
-
-Copyright (c) 2020-2021, Donald Erb
-All rights reserved.
-
-Redistribution and use in source and binary forms, with or without
-modification, are permitted provided that the following conditions are met:
-
-1. Redistributions of source code must retain the above copyright notice, this
-   list of conditions and the following disclaimer.
-
-2. Redistributions in binary form must reproduce the above copyright notice,
-   this list of conditions and the following disclaimer in the documentation
-   and/or other materials provided with the distribution.
-
-3. Neither the name of the copyright holder nor the names of its
-   contributors may be used to endorse or promote products derived from
-   this software without specific prior written permission.
-
-THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
-AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
-FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
-DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
-SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
-CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
-OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+Attributes
+----------
+EXPAND_IMAGES : bool
+    If True (default), will expand images to fit the size specified by
+    PAGE_LAYOUT while retaining the original aspect ratio. If False, the
+    pdf page with the image will directly fit the image's original size.
+FONT : str
+    The font name to use. If FONT_PATH is None, then it must be the name
+    of a font covered by pymupdf. Default is 'helvetica'. Font is only
+    used for converting text files to pdf.
+FONT_PATH : str or None
+    The file path to the font file to use, if not using a built-in font
+    from pymupdf. Default is None, which means that FONT is a built-in font.
+    Only used if converting text files to pdf.
+FONT_SIZE : int
+    The font size. Used for converting epub, html, and text files to pdf.
+    Default is 11.
+PAGE_LAYOUT : str
+    A string designating the paper size to use. Must be a valid input for
+    fitz.PaperSize. Default is 'letter'. Append '-l' to change the page
+    orientation.
+USE_LANDSCAPE : bool
+    If True, will append '-l' to PAGE_LAYOUT before passing it to fitz.PaperSize.
 
 """
 
+import functools
 import io
 import os
 from pathlib import Path
+import re
+import textwrap
 import traceback
 
 import fitz
 import wx
 import wx.grid
-from wx.lib.pdfviewer import pdfViewer, pdfButtonPanel
-
-try:
-    import ctypes
-except ImportError:
-    ctypes = None
 
 
 fitz.TOOLS.mupdf_display_errors(False)
+
+
+EXPAND_IMAGES = True
+FONT = 'Helvetica'
+FONT_PATH = None
+FONT_SIZE = 11
+PAGE_LAYOUT = 'letter'
+USE_LANDSCAPE = False
+
+
+class SettingsDialog(wx.Dialog):
+    """
+    Allows changing the default settings for page configuration.
+
+    Parameters
+    ----------
+    parent : wx.Window, optional
+        The parent widget for the dialog.
+    **kwargs
+        Any additional keyword arguments for initializing wx.Dialog.
+
+    """
+
+    def __init__(self, parent=None, **kwargs):
+        super().__init__(parent, **kwargs)
+
+        main_sizer = wx.BoxSizer(wx.HORIZONTAL)
+
+        sizer_1 = wx.BoxSizer(wx.VERTICAL)
+        main_sizer.Add(sizer_1, 1, wx.ALL | wx.EXPAND, 5)
+
+        label_1 = wx.StaticText(
+            self, label='Note: these settings are not used\nif directly using PDF files.',
+            style=wx.ALIGN_CENTER_HORIZONTAL
+        )
+        sizer_1.Add(label_1, 0, wx.ALIGN_CENTER_HORIZONTAL | wx.BOTTOM, 5)
+
+        self.expand_images = wx.CheckBox(self, label='Expand/shrink images to fill page')
+        self.expand_images.SetValue(EXPAND_IMAGES)
+        sizer_1.Add(self.expand_images, 0, wx.BOTTOM | wx.TOP, 5)
+
+        sizer_6 = wx.BoxSizer(wx.HORIZONTAL)
+        sizer_1.Add(sizer_6, 1, wx.BOTTOM | wx.EXPAND | wx.TOP, 5)
+        label_4 = wx.StaticText(self, label='Page Layout')
+        sizer_6.Add(label_4, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 10)
+
+        paper_sizes = list(fitz.paperSizes.keys())
+        self.page_layout = wx.Choice(self, wx.ID_ANY, choices=paper_sizes)
+        if PAGE_LAYOUT in fitz.paperSizes:
+            selection = paper_sizes.index(PAGE_LAYOUT)
+        else:
+            selection = paper_sizes.index('letter')
+        self.page_layout.SetSelection(selection)
+        sizer_6.Add(self.page_layout, 0, wx.ALIGN_CENTER_VERTICAL, 0)
+
+        self.landscape = wx.CheckBox(self, label='Use landscape (makes width > height)')
+        self.landscape.SetValue(USE_LANDSCAPE)
+        sizer_1.Add(self.landscape, 0, wx.BOTTOM | wx.TOP, 5)
+
+        sizer_4 = wx.BoxSizer(wx.HORIZONTAL)
+        sizer_1.Add(sizer_4, 1, wx.BOTTOM | wx.EXPAND | wx.TOP, 5)
+
+        label_2 = wx.StaticText(self, label='Font')
+        sizer_4.Add(label_2, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 10)
+
+        self.font = wx.Choice(self, choices=fitz.Base14_fontnames)
+        if FONT in fitz.Base14_fontnames:
+            selection = fitz.Base14_fontnames.index(FONT)
+        else:
+            selection = fitz.Base14_fontnames.index('Helvetica')
+        self.font.SetSelection(selection)
+        sizer_4.Add(self.font, 0, wx.ALIGN_CENTER_VERTICAL, 0)
+
+        sizer_5 = wx.BoxSizer(wx.HORIZONTAL)
+        sizer_1.Add(sizer_5, 1, wx.BOTTOM | wx.EXPAND | wx.TOP, 5)
+
+        label_3 = wx.StaticText(self, label='Font Size')
+        sizer_5.Add(label_3, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 10)
+
+        self.font_size = wx.SpinCtrl(self, value=str(int(float(FONT_SIZE))), min=1, max=256)
+        sizer_5.Add(self.font_size, 0, wx.ALIGN_CENTER_VERTICAL, 0)
+
+        # filler
+        sizer_1.Add((20, 20), 0, 0, 0)
+
+        sizer_3 = wx.StdDialogButtonSizer()
+        sizer_1.Add(sizer_3, 0, wx.ALIGN_RIGHT | wx.ALL, 5)
+        self.button_OK = wx.Button(self, wx.ID_OK)
+        self.button_OK.SetDefault()
+        sizer_3.AddButton(self.button_OK)
+        self.button_CANCEL = wx.Button(self, wx.ID_CANCEL)
+        sizer_3.AddButton(self.button_CANCEL)
+        sizer_3.Realize()
+
+        self.SetAffirmativeId(self.button_OK.GetId())
+        self.SetEscapeId(self.button_CANCEL.GetId())
+
+        self.SetSizer(main_sizer)
+        main_sizer.Fit(self)
+
+    def set_options(self):
+        """Overrides the global config variables."""
+        global EXPAND_IMAGES
+        global FONT
+        global FONT_SIZE
+        global PAGE_LAYOUT
+        global USE_LANDSCAPE
+
+        EXPAND_IMAGES = self.expand_images.GetValue()
+        FONT = self.font.GetStringSelection()
+        FONT_SIZE = self.font_size.GetValue()
+        PAGE_LAYOUT = self.page_layout.GetStringSelection()
+        USE_LANDSCAPE = self.landscape.GetValue()
 
 
 class PagesGrid(wx.grid.Grid):
@@ -114,7 +220,7 @@ class PagesGrid(wx.grid.Grid):
         self.SetColLabelValue(3, 'Rotation')
         self.SetColLabelValue(4, 'Total Pages')
 
-    def add_row(self, file_path):
+    def add_row(self, file_path, row_index=None):
         """
         Appends a row to the grid with information after opening the given file.
 
@@ -122,17 +228,20 @@ class PagesGrid(wx.grid.Grid):
         ----------
         file_path : str or os.Pathlike
             The path of the pdf file to open and read.
+        row_index : int, optional
+            The index to insert a new row. Default is None, which will append
+            the row to the grid.
 
         """
         try:
-            pdf = fitz.Document(file_path)
-            if pdf.needsPass:  # password protected
+            pdf = get_pdf(file_path)
+            if pdf.needs_pass:  # password protected
                 raise ValueError('File is encrypted and cannot be processed')
             pages = len(pdf)
-        except Exception as exc:
+        except Exception:
             with wx.MessageDialog(
                 self,
-                (f'Problem opening {file_path}\n\nError:\n{repr(exc)}'),
+                (f'Problem opening {file_path}\n\nError:\n    {traceback.format_exc()}'),
             ) as dlg:
                 dlg.ShowModal()
             return
@@ -142,8 +251,12 @@ class PagesGrid(wx.grid.Grid):
             except Exception:
                 pass
 
-        row = self.GetNumberRows()
-        self.AppendRows(1)
+        if row_index is None:
+            row = self.GetNumberRows()
+            self.AppendRows(1)
+        else:
+            row = row_index
+            self.InsertRows(row)
         self.create_row(row, file_path, pages)
 
     def create_row(self, row, file_path, total_pages, first_page='1', last_page=None, rotation=None):
@@ -243,8 +356,13 @@ class PDFMerger(wx.Frame):
 
     def __init__(self, parent=None, **kwargs):
         super().__init__(parent, **kwargs)
-        self.SetSize((990, 520))
+        self.SetSize(self.FromDIP((900, 500)))
         self.preview = None
+
+        self.menubar = wx.MenuBar()
+        self.options_menu = wx.Menu('Set Options', 0)
+        self.menubar.Append(self.options_menu, "Options")
+        self.SetMenuBar(self.menubar)
 
         self.panel = wx.Panel(self)
         sizer = wx.BoxSizer(wx.VERTICAL)
@@ -255,10 +373,10 @@ class PDFMerger(wx.Frame):
         grid_sizer_1 = wx.GridSizer(1, 2, 0, 20)
         sizer_1.Add(grid_sizer_1, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 10)
 
-        self.add_btn = wx.Button(self.panel, wx.ID_ANY, 'Add Files', style=wx.BU_EXACTFIT)
+        self.add_btn = wx.Button(self.panel, label='Add Files')
         grid_sizer_1.Add(self.add_btn, 0, wx.EXPAND, 0)
 
-        self.remove_btn = wx.Button(self.panel, wx.ID_ANY, 'Remove Files', style=wx.BU_EXACTFIT)
+        self.remove_btn = wx.Button(self.panel, label='Remove Files')
         grid_sizer_1.Add(self.remove_btn, 0, wx.EXPAND, 0)
 
         label_1 = wx.StaticText(
@@ -302,7 +420,7 @@ class PDFMerger(wx.Frame):
         self.save_btn = wx.Button(self.panel, wx.ID_SAVE)
         sizer_4.Add(self.save_btn, 0, wx.RIGHT, 10)
 
-        self.preview_btn = wx.Button(self.panel, wx.ID_ANY, 'Preview')
+        self.preview_btn = wx.Button(self.panel, label='Preview')
         sizer_4.Add(self.preview_btn, 0, 0, 0)
 
         self.panel.SetSizer(sizer)
@@ -315,13 +433,45 @@ class PDFMerger(wx.Frame):
         self.saveas_btn.Bind(wx.EVT_BUTTON, self.on_saveas)
         self.save_btn.Bind(wx.EVT_BUTTON, self.on_save)
         self.preview_btn.Bind(wx.EVT_BUTTON, self.on_preview)
+        self.Bind(wx.EVT_MENU, self.set_options, self.menubar)
+
+    def set_options(self, event):
+        """
+        Launches dialog to override the global settings.
+
+        If the dialog is confirmed, then the grid data will be reset for all file
+        types except for pdf and xps files so that the page information can be
+        updated. Image files will keep their rotations as well.
+
+        """
+        reset_grid = False
+        with SettingsDialog(self, title='Options') as dialog:
+            if dialog.ShowModal() == wx.ID_OK:
+                dialog.set_options()
+                reset_grid = True
+
+        if reset_grid:
+            self.Freeze()
+            grid_data = self.grid.get_values()
+            rotations = {0: '0°', -90: '-90° (left)', 90: '90° (right)', 180: '180°'}
+            for row, row_data in enumerate(grid_data):
+                if re.search('.*xps|pdf', Path(row_data[0]).suffix) is None:
+                    self.grid.DeleteRows(row)
+                    self.grid.add_row(row_data[0], row)
+                    if is_image(row_data[0]):
+                        self.grid.SetCellValue(row, 3, rotations[row_data[3]])
+            self.Thaw()
+        event.Skip()
 
     def on_add(self, event):
         """Launches file dialog to select pdf files and adds them to the grid."""
         paths = []
         with wx.FileDialog(
             self, 'Select files',
-            wildcard='PDF Files (*.pdf)|*.pdf',
+            wildcard=(
+                'PDF Files|*.pdf|Image Files|*.jp*;*.png;*.tif*;*.svg;*.gif;*.bmp|'
+                'XPS Files|*.*xps|HTML Files|*.htm*|EPUB Files|*.epub|All Files|*.*'
+            ),
             style=wx.FD_OPEN | wx.FD_CHANGE_DIR | wx.FD_FILE_MUST_EXIST | wx.FD_MULTIPLE
         ) as dialog:
             if dialog.ShowModal() == wx.ID_OK:
@@ -425,6 +575,8 @@ class PDFMerger(wx.Frame):
             output_pdf = merge_pdfs(grid_data, True)
             if len(output_pdf) == 0:
                 raise ValueError('The output pdf has no pages.')
+            # note: garbate > 2 will merge the same objects, which can cause issues viewing
+            # the pdf with Adobe (although the pdf can still be viewed with other software)
             output_pdf.save(output_path, garbage=4, deflate=1)
         except Exception:
             with wx.MessageDialog(
@@ -438,7 +590,7 @@ class PDFMerger(wx.Frame):
                 'Save Successful'
             ) as dlg:
                 dlg.ShowModal()
-            self.Close()
+            self.output_file.SetValue('')
         finally:
             try:
                 output_pdf.close()
@@ -498,15 +650,12 @@ def merge_pdfs(grid_data, finalize=False):
 
     """
     current_pg = 0
-    output_file = fitz.Document()  # same as fitz.open, but usage is more clear
+    output_file = fitz.Document()
     total_toc = []  # collects the bookmarks from all of the files
     for file_path, first_pg, last_pg, rotation in grid_data:
         path = Path(file_path)
-        if path.suffix.lower() != '.pdf':
-            print(f'\nThe following file cannot be processed:\n\n    {str(path)}')
-            continue
 
-        with fitz.open(str(path)) as temp_file:
+        with get_pdf(path, finalize) as temp_file:
             pages = len(temp_file)
 
             # ensures pages are within the document
@@ -517,7 +666,7 @@ def merge_pdfs(grid_data, finalize=False):
                 last_pg = pages - 1
 
             # only add unencrypted files
-            if not temp_file.needsPass:
+            if not temp_file.needs_pass:
                 output_file.insert_pdf(
                     temp_file, from_page=first_pg, to_page=last_pg,
                     rotate=rotation, links=finalize, annots=True
@@ -546,19 +695,23 @@ def merge_pdfs(grid_data, finalize=False):
             for link in toc:
                 lnk_type = link[3]["kind"]
 
-                # skip the bookmark if it's "goto" and not within the page range
-                if (link[2] - 1) not in pg_range and lnk_type == fitz.LINK_GOTO:
+                if lnk_type == fitz.LINK_NAMED:
+                    # skip named links since pymupdf cannot process them
                     continue
                 elif lnk_type == fitz.LINK_GOTO:
-                    page_num = pg_range.index(link[2] - 1) + current_pg + 1
+                    if link[2] - 1 not in pg_range:
+                        # skip the bookmark if it's not within the page range
+                        continue
+                    else:
+                        page_num = pg_range.index(link[2] - 1) + current_pg + 1
 
-                # fix bookmark levels left by filler bookmarks
-                while (link[0] > last_lvl + 1):
-                    total_toc.append([last_lvl + 1, "<>", page_num, link[3]])
-                    last_lvl += 1
+                        # fix bookmark levels left by filler bookmarks
+                        while (link[0] > last_lvl + 1):
+                            total_toc.append([last_lvl + 1, "<>", page_num, link[3]])
+                            last_lvl += 1
 
-                last_lvl = link[0]
-                link[2] = page_num
+                        last_lvl = link[0]
+                        link[2] = page_num
                 total_toc.append(link)
 
             current_pg += len(pg_range)
@@ -569,111 +722,213 @@ def merge_pdfs(grid_data, finalize=False):
     return output_file
 
 
-class PDFApp(wx.App):
-    """The app for launching the PDFMerger frame."""
-
-    def OnInit(self):
-        """Handles the initialization of the PDFMerger frame."""
-        self.frame = PDFMerger(None, title='PDF Merger')
-        self.SetTopWindow(self.frame)
-        self.frame.Show()
-        return True
+def get_page_layout():
+    """Returns the selected page layout."""
+    page_layout = PAGE_LAYOUT
+    if USE_LANDSCAPE and not page_layout.endswith('-l'):
+        page_layout += '-l'
+    return page_layout
 
 
-def set_dpi_awareness(awareness_level=1):
+def get_pdf(file_name, finalize=False):
     """
-    Sets DPI awareness for Windows operating system so that GUIs are not blurry.
-
-    Fixes blurry GUIs due to weird dpi scaling in Windows os. Other
-    operating systems are ignored.
+    Generates a pymupdf Document based on the file extension of the file.
 
     Parameters
     ----------
-    awareness_level : {1, 0, 2}
-        The dpi awareness level to set. 0 turns off dpi awareness, 1 sets dpi
-        awareness to scale with the system dpi and automatically changes when
-        the system dpi changes, and 2 sets dpi awareness per monitor and does
-        not change when system dpi changes. Default is 1.
+    file_name : str or os.Pathlike
+        The file path for the document.
+    finalize : bool, optional
+        If False (default), will not copy table of contents for xps, html, or
+        epub files. If True, will copy the table of contents.
 
-    Raises
-    ------
-    ValueError
-        Raised if awareness_level is not 0, 1, or 2.
+    Returns
+    -------
+    fitz.Document
+        The file converted to a pymupdf Document using the appropriate conversions.
+
+    """
+    path = Path(file_name)
+    suffix = path.suffix.lower()
+    if suffix.startswith('.'):
+        suffix = suffix[1:]
+
+    if suffix == 'pdf':
+        return fitz.Document(file_name)
+    elif re.search('.*xps|epub|htm.*', suffix) is not None:
+        return document_to_pdf(file_name, finalize)
+    elif is_image(file_name):
+        return image_to_pdf(file_name)
+    else:
+        return text_to_pdf(file_name)
+
+
+def document_to_pdf(file_name, finalize=False):
+    """
+    Converts epub, html, and xps files to pdf while retaining links and table of contents.
+
+    Parameters
+    ----------
+    file_name : str or os.Pathlike
+        The file path for the document.
+    finalize : bool, optional
+        If False (default), will not copy table of contents for xps, html, or
+        epub files. If True, will copy the table of contents.
+
+    Returns
+    -------
+    pdf : fitz.Document
+        The file converted to a pymupdf Document using the appropriate conversions.
 
     Notes
     -----
-    Will only work on Windows 8.1 or Windows 10. Not sure if earlier versions
-    of Windows have this issue anyway.
-
-    Copied from mcetl.
+    htm* and epub files are sized according to PAGE_LAYOUT and FONT_SIZE since
+    their size can be variable.
 
     """
-    # 'nt' designates Windows operating system
-    if os.name == 'nt' and ctypes is not None:
-        if awareness_level not in (0, 1, 2):
-            raise ValueError('Awareness level must be either 0, 1, or 2.')
-        try:
-            ctypes.oledll.shcore.SetProcessDpiAwareness(awareness_level)
-        except (AttributeError, OSError, PermissionError):
-            # AttributeError is raised if the dll loader was not created, OSError
-            # is raised if setting the dpi awareness errors, and PermissionError is
-            # raised if the dpi awareness was already set, since it can only be set
-            # once per thread. All are ignored.
-            pass
+    path = Path(file_name)
+    width, height = fitz.PaperSize(get_page_layout())
+    with fitz.Document(str(path), width=width, height=height, fontsize=FONT_SIZE) as original:
+        pdf = fitz.Document(filetype='pdf', stream=original.convert_to_pdf())
+        if finalize:
+            pdf.set_toc(original.get_toc())
+
+    return pdf
 
 
-class ButtonPanel(pdfButtonPanel):
+def text_to_pdf(file_name):
     """
-    A custom button panel that overrides some of the buttons from pdfButtonPanel.
-
-    Ensures saving and printing is not done through the viewer, and only allows
-    zooming up to 200% (can still manually enter a higher zoom number though, but
-    that requires deliberate action to do).
+    Converts text files to pdf.
 
     Parameters
     ----------
-    parent : wx.Window
-        The parent widget for the button panel.
+    file_name : str or os.Pathlike
+        The file path for the text document.
+
+    Returns
+    -------
+    pdf : fitz.Document
+        The file converted to a pymupdf Document.
+
+    Notes
+    -----
+    Uses the default pymupdf settings to determine the maximum lines per page and
+    characters per line (although the max lines per page is slightly different...?).
+
+    Works okay when using Helvetica and size 11 font, but is not guaranteed to work
+    for all cases. Best to just use Word to convert text to pdf, if available.
 
     """
+    width, height = fitz.PaperSize(get_page_layout())
+    # 108 is the header + footer spacing (72 is the botton of the first inserted
+    # row, and the footer is made to be 36). 1.4 designates that line spacing
+    # is 20% of the font size, above and below; should be just 1.2,
+    # but 1.4 works better.
+    page_lines = int((height - 108) / (1.4 * FONT_SIZE))
+    # estimate character width using 0 as the average character
+    # 100 is the left and right margins, 50 points each by default
+    max_chars = int((width - 100) / fitz.Font(FONT, FONT_PATH).text_length('0', FONT_SIZE))
+    line_count = 0
+    page_buffer = ''
 
-    def __init__(self, parent):
-        super().__init__(parent, wx.ID_ANY, wx.DefaultPosition, wx.DefaultSize, 0)
+    pdf = fitz.Document()
+    with open(file_name) as text_file:
+        for item in text_file:
+            if len(item) > max_chars:
+                line_list = textwrap.wrap(item, width=max_chars, subsequent_indent='\n')
+                line_list[-1] += '\n'
+            else:
+                line_list = [item]
+            for line in line_list:
+                page_buffer += line
+                line_count += 1
+                if line_count >= page_lines:
+                    pdf.insert_page(
+                        -1, text=page_buffer, fontsize=FONT_SIZE,
+                        width=width, height=height, fontname=FONT, fontfile=FONT_PATH
+                    )
+                    line_count = 0
+                    page_buffer = ''
+        if page_buffer:
+            pdf.insert_page(
+                -1, text=page_buffer, fontsize=FONT_SIZE,
+                width=width, height=height, fontname=FONT, fontfile=FONT_PATH
+            )
 
-        # remove zooms > 200% since high zooms greatly increases memory usage
-        # and lags the viewer.
-        delete_indices = []
-        for i, selection in enumerate(self.zoom.GetStrings()):
-            try:
-                if int(selection[:-1]) > 200:
-                    delete_indices.append(i)
-            except ValueError:
-                pass
-        for i in reversed(delete_indices):
-            self.zoom.Delete(i)
-        self.DoLayout()
+    return pdf
 
-    def OnSave(self, event):
-        """Overrides super class's method to disable saving."""
-        with wx.MessageDialog(
-            self.GetParent(),
-            'Saving is not allowed here.', 'Saving Disabled'
-        ) as dlg:
-            dlg.ShowModal()
 
-    def OnPrint(self, event):
-        """Overrides super class's method to disable printing."""
-        with wx.MessageDialog(
-            self.GetParent(),
-            'Printing is not allowed here.', 'Printing Disabled'
-        ) as dlg:
-            dlg.ShowModal()
+def image_to_pdf(file_name):
+    """
+    Converts image files to pdf.
 
-    def OnZoomIn(self, event):
-        """Overrides super class's method to ensure max zoom using the button is 200%."""
-        if self.percentzoom > 100:
-            self.percentzoom = 100
-        super().OnZoomIn(event)
+    Expands the image to fit PAGE_LAYOUT, while retaining its aspect ratio.
+
+    Parameters
+    ----------
+    file_name : str or os.Pathlike
+        The file path for the text document.
+
+    Returns
+    -------
+    pdf : fitz.Document
+        The file converted to a pymupdf Document.
+
+    Notes
+    -----
+    Uses fitz.Page.insert_image rather than fitz.Page.show_pdf_page
+    for most image types becaues insert_image correctly keeps transparency.
+    show_pdf_page is used for svg images, since they cannot be directly
+    used by fitz.Pixmap. Not
+
+    """
+    path = Path(file_name)
+    width, height = fitz.PaperSize(get_page_layout())
+    stream = None
+    with fitz.Document(str(path)) as doc:
+        image_rect = doc[0].rect
+        if not EXPAND_IMAGES:
+            width, height = image_rect.width, image_rect.height
+        elif ((image_rect.width > image_rect.height and width < height)
+                or (image_rect.width < image_rect.height and width > height)):
+            width, height = height, width
+
+        if 'svg' in path.suffix:
+            # have to convert svg to pdf since pymupdf cannot use svg as a Pixmap
+            stream = doc.convert_to_pdf()
+
+    pdf = fitz.Document()
+    page = pdf.new_page(width=width, height=height)
+    if stream is not None:
+        with fitz.Document(filetype='pdf', stream=stream) as image_pdf:
+            page.show_pdf_page(page.rect, image_pdf, 0)
+    else:
+        page.insert_image(page.rect, filename=str(path))
+
+    return pdf
+
+
+def is_image(file_name):
+    """
+    Determines if the file is a supported image file for pymupdf.
+
+    Parameters
+    ----------
+    file_name : str or os.Pathlike
+        The file path for the document.
+
+    Returns
+    -------
+    bool
+        Returns True if the file's extension is recognized as a compatible
+        image type for pymupdf.
+
+    Notes
+    -----
+    Supported extensions are jpg/jpeg/jpx, png, tif/tiff, svg, gif, and bmp.
+
+    """
+    return re.search('jp.*|png|tif.*|svg|gif|bmp', Path(file_name).suffix) is not None
 
 
 class PDFViewer(wx.Frame):
@@ -693,65 +948,438 @@ class PDFViewer(wx.Frame):
 
     def __init__(self, parent, pdf, **kwargs):
         super().__init__(parent, **kwargs)
+        self.current_pg = 1
+        self.zoom_level = -1  # fit page width
+        self.matrix = fitz.Matrix(1, 1)
+        self.pdf = self.load_pdf(pdf)
+        self._total_pages = len(self.pdf)
+        self._last_v_scroll = -1  # used to track vertical scrolling
+        self._redraw = False
 
-        self.panel = wx.Panel(self)
-        self.sizer = wx.BoxSizer(wx.VERTICAL)
-        self.panel.SetSizer(self.sizer)
-        self.buttons = ButtonPanel(self.panel)
+        self.main_panel = wx.Panel(self)
+        sizer_1 = wx.BoxSizer(wx.VERTICAL)
 
-        self.viewer = pdfViewer(
-            self.panel, wx.ID_ANY, wx.DefaultPosition, wx.DefaultSize, wx.BORDER_SUNKEN
+        self.tool_panel = wx.Panel(self.main_panel)
+        sizer_1.Add(self.tool_panel, 0, wx.ALL | wx.EXPAND, 5)
+
+        sizer_2 = wx.BoxSizer(wx.HORIZONTAL)
+
+        self.back_btn = wx.Button(self.tool_panel, label='Back', style=wx.BU_EXACTFIT)
+        sizer_2.Add(self.back_btn, 0, wx.LEFT, 5)
+
+        self.next_btn = wx.Button(self.tool_panel, label='Next', style=wx.BU_EXACTFIT)
+        sizer_2.Add(self.next_btn, 0, wx.RIGHT, 5)
+
+        # filler
+        sizer_2.Add((5, 5), 1, 0, 0)
+
+        label_2 = wx.StaticText(self.tool_panel, label='Page: ')
+        sizer_2.Add(label_2, 0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 20)
+
+        # creates a temporary wx.StaticText to determine the minimum size
+        # for the text control so that it isn't too large.
+        self.pg_input = wx.TextCtrl(self.tool_panel, value='1', style=wx.TE_PROCESS_ENTER)
+        temp_label = wx.StaticText(self.tool_panel, label='11111111')
+        self.pg_input.SetMinSize((temp_label.GetSize()[0], -1))
+        temp_label.Destroy()
+        temp_label = None
+        sizer_2.Add(self.pg_input, 0, wx.ALL, 0)
+
+        total_pages = wx.StaticText(self.tool_panel, label=f' /{self._total_pages}')
+        sizer_2.Add(total_pages, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+
+        # filler
+        sizer_2.Add((5, 5), 1, 0, 0)
+
+        label_4 = wx.StaticText(self.tool_panel, label='Zoom: ')
+        sizer_2.Add(label_4, 0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 20)
+
+        self.zoom_choice = wx.Choice(self.tool_panel)
+        zoom_levels = (
+            ('Fit width', -1), ('Fit page', 0), ('25%', 0.25), ('50%', 0.5),
+            ('75%', 0.75), ('100%', 1.0), ('125%', 1.25), ('150%', 1.5),
+            ('200%', 2.0), ('400%', 4.0)
         )
-        self.viewer.SetDoubleBuffered(True)  # reduces flicker when scrolling
+        for level in zoom_levels:
+            # add both a display text and client data for doing the zooming
+            self.zoom_choice.Append(*level)
+        self.zoom_choice.SetSelection(0)  # default to fit width
+        sizer_2.Add(self.zoom_choice, 0, 0, 0)
 
-        # let the viewer and buttons recognize each other
-        self.buttons.viewer = self.viewer
-        self.viewer.buttonpanel = self.buttons
+        self.zoom_out_btn = wx.Button(
+            self.tool_panel, label='Zoom Out', style=wx.BU_EXACTFIT
+        )
+        sizer_2.Add(self.zoom_out_btn, 0, wx.LEFT, 10)
 
-        self.sizer.Add(self.buttons, 0, wx.EXPAND)
-        self.sizer.Add(self.viewer, 1, wx.EXPAND)
+        self.zoom_in_btn = wx.Button(
+            self.tool_panel, label='Zoom In', style=wx.BU_EXACTFIT
+        )
+        sizer_2.Add(self.zoom_in_btn, 0, wx.RIGHT, 5)
 
-        self.load_pdf(pdf)
-        self.sizer.Fit(self.buttons)
-        self.SetSize((self.buttons.GetSize()[0], wx.GetDisplaySize()[1] - 100))
+        self.tool_panel.SetSizer(sizer_2)
 
+        self.display_panel = wx.ScrolledWindow(self.main_panel, style=wx.BORDER_SUNKEN)
+        self.display_panel.SetBackgroundColour('#959595')
+        self.display_panel.SetScrollRate(20, 20)
+        # use double buffer to prevent flickering when
+        # moving between pages or scrolling on a page
+        self.display_panel.SetDoubleBuffered(True)
+        # initially disable horizontal scrolling
+        self.display_panel.ShowScrollbars(wx.SHOW_SB_NEVER, wx.SHOW_SB_DEFAULT)
+        self.display_panel.EnableScrolling(False, True)
+        sizer_1.Add(self.display_panel, 1, wx.ALL | wx.EXPAND, 0)
+
+        sizer_3 = wx.BoxSizer(wx.HORIZONTAL)
+        self.pdf_bitmap = wx.StaticBitmap(self.display_panel)
+        sizer_3.Add(self.pdf_bitmap, 1)
+        self.render_page(1)
+        self.display_panel.SetSizer(sizer_3)
+        self.main_panel.SetSizer(sizer_1)
+
+        self.Layout()
+        self.tool_panel.Fit()
+        self.SetSize((self.tool_panel.GetSize()[0] + 20, wx.GetDisplaySize()[1] - 100))
+
+        self.back_btn.Bind(wx.EVT_BUTTON, self.on_back)
+        self.next_btn.Bind(wx.EVT_BUTTON, self.on_next)
+        self.zoom_choice.Bind(wx.EVT_CHOICE, self.on_zoom)
+        self.zoom_in_btn.Bind(wx.EVT_BUTTON, self.on_zoom_in)
+        self.zoom_out_btn.Bind(wx.EVT_BUTTON, self.on_zoom_out)
+        self.display_panel.Bind(wx.EVT_MOUSEWHEEL, self.on_scroll)
+        self.display_panel.Bind(wx.EVT_CHAR, self.on_key)
+        self.display_panel.Bind(wx.EVT_LEFT_DOWN, self.set_focus)
+        self.pdf_bitmap.Bind(wx.EVT_LEFT_DOWN, self.set_focus)
+        self.pg_input.Bind(wx.EVT_TEXT_ENTER, self.go_to_page)
+        self.pg_input.Bind(wx.EVT_KILL_FOCUS, self.go_to_page)
         self.Bind(wx.EVT_CLOSE, self.on_close)
+        self.Bind(wx.EVT_SIZE, self.on_resize)
+        self.Bind(wx.EVT_IDLE, self.on_idle)
+
+    def set_focus(self, event=None):
+        """Focuses on the display on left-clicks so that arrow keys can scroll."""
+        self.display_panel.SetFocus()
+        if event is not None:
+            event.Skip()
+
+    def on_key(self, event):
+        """Allows using arrow keys to also scroll and/or move pages."""
+        mouse_wheel_events = {
+            wx.WXK_UP: {'axis': wx.MOUSE_WHEEL_VERTICAL, 'rotation': 1},
+            wx.WXK_DOWN: {'axis': wx.MOUSE_WHEEL_VERTICAL, 'rotation': -1},
+            wx.WXK_LEFT: {'axis': wx.MOUSE_WHEEL_HORIZONTAL, 'rotation': -1},
+            wx.WXK_RIGHT: {'axis': wx.MOUSE_WHEEL_HORIZONTAL, 'rotation': 1},
+        }
+        if event.GetKeyCode() not in mouse_wheel_events:
+            event.Skip()
+        else:
+            mouse_event = wx.MouseEvent()
+            key = event.GetKeyCode()
+            mouse_event.SetWheelAxis(mouse_wheel_events[key]['axis'])
+            mouse_event.SetWheelRotation(mouse_wheel_events[key]['rotation'])
+
+            page = self.current_pg
+            self.on_scroll(mouse_event)
+            if self.current_pg == page:  # scroll only if pages were not changed
+                event.Skip()
+
+    def on_idle(self, event):
+        """Redraws the image once sizing is completed."""
+        if self._redraw:
+            self.render_page(self.current_pg)
+            self._redraw = False
+        event.Skip()
+
+    def on_resize(self, event):
+        """Queues up a redraw of the pdf if zoom level is set to fit page or width."""
+        if not self._redraw and self.zoom_level <= 0:
+            self._redraw = True
+        event.Skip()
 
     def load_pdf(self, pdf):
         """
-        Ensures that the pdf is a str or buffer so that pdfViewer can use it.
+        Creates a pymupdf Document for viewing.
 
         Parameters
         ----------
         pdf : str or io.BytesIO or os.Pathlike or fitz.Document
             The file or buffer stream to display.
 
+        Returns
+        -------
+        fitz.Document
+            The fitz Document.
+
+        Notes
+        -----
+        If the input pdf is already a fitz.Document, then a new document is created
+        from that document so that this frame has sole ownership of the pdf.
+
         """
-        if isinstance(pdf, (str, io.BytesIO)):
-            file_stream = pdf
-        elif isinstance(pdf, os.PathLike):
-            file_stream = str(Path(pdf))
-        elif isinstance(pdf, fitz.Document):
+        if isinstance(pdf, fitz.Document):
             # fitz.Document.write was changes to .tobytes in pymupdf v1.18.7
             if hasattr(pdf, 'tobytes'):
-                file_stream = io.BytesIO(pdf.tobytes())
+                stream = io.BytesIO(pdf.tobytes())
             else:
-                file_stream = io.BytesIO(pdf.write())
+                stream = io.BytesIO(pdf.write())
+            file_name = 'pdf'
+        elif isinstance(pdf, (str, os.PathLike)):
+            file_name = str(Path(pdf))
+            stream = None
         else:
-            raise NotImplementedError(f'Using {type(pdf)} is not implemented.')
+            # assume it is a file stream
+            file_name = 'pdf'
+            stream = pdf
 
-        self.viewer.LoadFile(file_stream)
+        return fitz.Document(file_name, stream)
+
+    @functools.lru_cache(maxsize=500)
+    def get_displaylist(self, page):
+        """
+        Gets the DisplayList for the given page.
+
+        Results are cached so that repeated lookups are faster (The DisplayLists
+        do not require much memory to cache).
+
+        Parameters
+        ----------
+        page : int
+            The page to read from the pdf. 1-based.
+
+        Returns
+        -------
+        fitz.DisplayList
+            The DisplayList for the page.
+
+        """
+        return self.pdf[page - 1].get_displaylist()
+
+    def render_page(self, page, reset_scroll=False):
+        """
+        Displays the selected page onto the frame.
+
+        Parameters
+        ----------
+        page : int
+            The page to render. Is 1-indexed.
+        reset_scroll : bool
+            If False (default), will place the scrollbar at the bottom of the page
+            when going back pages. Otherwise, will place the scrollbar at the top.
+
+        Notes
+        -----
+        If the zoom level is set to fit the page, then the zoom matrix
+        is recalculated for each page.
+
+        Use self.Freeze to not update the frame while changing pages so
+        that the transition is much smoother, and then call self.Thaw.
+
+        """
+        if self.zoom_level <= 0:
+            area = self.get_displaylist(page).rect
+            height = area.height
+            width = area.width
+            display_area = self.display_panel.GetSize()
+            if self.zoom_level == 0:
+                zoom = min(display_area[0] / width, display_area[1] / height)
+            else:
+                # give a little space for a possible scrollbar
+                zoom = (display_area[0] - self.FromDIP(25)) / width
+            self.matrix = fitz.Matrix(zoom, zoom)
+
+        self.Freeze()
+        pixmap = self.get_displaylist(page).getPixmap(matrix=self.matrix, alpha=False)
+        self.pdf_bitmap.SetBitmap(wx.Bitmap.FromBuffer(pixmap.w, pixmap.h, pixmap.samples))
+        pixmap = None
+
+        self.main_panel.Layout()  # updates the display_panel's scrollbars
+        # update scrollbar position
+        if self.display_panel.CanScroll(wx.VERTICAL) and not reset_scroll:
+            v_scroll = self.display_panel.GetScrollRange(wx.VERTICAL)
+        else:
+            v_scroll = 0
+
+        if self.current_pg == self._total_pages and page == 1:
+            self.display_panel.Scroll(0, 0)
+        elif self.current_pg == 1 and page == self._total_pages:
+            self.display_panel.Scroll(0, v_scroll)
+        elif page > self.current_pg:
+            self.display_panel.Scroll(0, 0)
+        elif page < self.current_pg:
+            self.display_panel.Scroll(0, v_scroll)
+
+        self.current_pg = page
+        self._last_v_scroll = -1
+        self.display_panel.SetFocus()
+
+        self.Thaw()
+
+    def go_to_page(self, event):
+        """Goes to the page specified by the user, if it is valid."""
+        try:
+            page = int(self.pg_input.GetValue())
+        except ValueError:
+            page = self.current_pg
+            self.pg_input.SetValue(str(self.current_pg))
+
+        if page != self.current_pg:
+            self._go_to_page(page)
+            self.display_panel.Scroll(0, 0)
+        event.Skip()
+
+    def on_back(self, event=None):
+        """Goes to the previous page and resets the scrollbar."""
+        self._go_to_page(self.current_pg - 1, True)
+
+    def on_next(self, event=None):
+        """Goes to the next page and resets the scrollbar."""
+        self._go_to_page(self.current_pg + 1, True)
+
+    def _go_to_page(self, page, reset_scroll=False):
+        """
+        Goes to the selected page.
+
+        Parameters
+        ----------
+        page : int
+            The page to render; 1-based. If the specified page is < 1, then the last
+            page of the document is rendered. Likewise, if the specified page is greater
+            than the total number of pages, then the first page is shown. This way, can
+            scroll from the first page back to the last page.
+        reset_scroll : bool
+
+
+        """
+        if page > self._total_pages:
+            new_page = 1
+        elif page < 1:
+            new_page = self._total_pages
+        else:
+            new_page = page
+
+        self.pg_input.SetValue(str(new_page))
+        self.render_page(new_page, reset_scroll)
+
+    def on_zoom(self, event=None):
+        """Gets the zoom level specified by the user."""
+        zoom_level = self.zoom_choice.GetClientData(self.zoom_choice.GetSelection())
+        self._zoom(zoom_level)
+        event.Skip()
+
+    def on_zoom_out(self, event):
+        """Increases the zoom level, if possible."""
+        new_zoom = None
+        zoom_index = self.zoom_choice.GetSelection()
+        if self.zoom_choice.GetClientData(zoom_index) <= 0:
+            new_zoom = 1  # reset to 100% zoom
+            new_index = 5
+        elif self.zoom_choice.GetClientData(zoom_index - 1) > 0:
+            new_zoom = self.zoom_choice.GetClientData(zoom_index - 1)
+            new_index = zoom_index - 1
+        if new_zoom:
+            self.zoom_choice.SetSelection(new_index)
+            self._zoom(new_zoom)
+
+        event.Skip()
+
+    def on_zoom_in(self, event):
+        """Decreases the zoom level, if possible."""
+        new_zoom = None
+        zoom_index = self.zoom_choice.GetSelection()
+        if self.zoom_choice.GetClientData(zoom_index) <= 0:
+            new_zoom = 1  # reset to 100% zoom
+            new_index = 5
+        elif zoom_index + 1 < self.zoom_choice.GetCount():
+            new_zoom = self.zoom_choice.GetClientData(zoom_index + 1)
+            new_index = zoom_index + 1
+        if new_zoom:
+            self.zoom_choice.SetSelection(new_index)
+            self._zoom(new_zoom)
+        event.Skip()
+
+    def _zoom(self, zoom_level):
+        """
+        Updates the zoom level and renders the page with the new zoom.
+
+        If the zoom level is 0 (fit to page), then scrolling is disabled and the
+        scrollbars are made to not appear. If the zoom level if -1 (fit to width),
+        then only horizontal scrollbars are disabled and hidden. Otherwise, the
+        scrollbars are enabled and will appear if needed.
+
+        """
+        if zoom_level == self.zoom_level:
+            return
+
+        if zoom_level <= 0:
+            self.display_panel.ShowScrollbars(
+                wx.SHOW_SB_NEVER, wx.SHOW_SB_DEFAULT if zoom_level == -1 else wx.SHOW_SB_NEVER
+            )
+            self.display_panel.EnableScrolling(False, zoom_level == -1)
+        else:
+            self.display_panel.ShowScrollbars(wx.SHOW_SB_DEFAULT, wx.SHOW_SB_DEFAULT)
+            self.display_panel.EnableScrolling(True, True)
+        self.zoom_level = zoom_level
+        if self.zoom_level > 0:
+            self.matrix = fitz.Matrix(self.zoom_level, self.zoom_level)
+        self.render_page(self.current_pg)
+
+    def on_scroll(self, event):
+        """
+        Handles scrolling up or down to either scroll or move pages.
+
+        Horizontal scrolls are ignored, and will not move between pages.
+
+        """
+        if event.GetWheelAxis() == wx.MOUSE_WHEEL_HORIZONTAL:
+            event.Skip()
+            return
+
+        if not (self.display_panel.HasScrollbar(wx.VERTICAL)
+                and self.display_panel.GetScrollPos(wx.VERTICAL) != self._last_v_scroll):
+            # scroll up gives positive rotation
+            if event.GetWheelRotation() > 0:
+                self._go_to_page(self.current_pg - 1)
+            else:
+                self._go_to_page(self.current_pg + 1)
+        else:
+            event.Skip()  # only skip if not changing pages so it doesn't scroll
+            self._last_v_scroll = self.display_panel.GetScrollPos(wx.VERTICAL)
 
     def on_close(self, event):
-        """Ensures that the fitz.Document is closed."""
+        """
+        Cleans up everything associated with the window before closing.
+
+        Closes the fitz.Document and clears the DisplayList cache.
+
+        """
         try:
-            self.viewer.pdfdoc.pdfdoc.close()
-        except ValueError:
+            self.pdf.close()
+        except Exception:
             pass  # the fitz.Document was already closed
+        self.pdf = None
+        self.get_displaylist.cache_clear()
         event.Skip()
 
 
+class PDFApp(wx.App):
+    """The app for launching the PDFMerger frame."""
+
+    def OnInit(self):
+        """Handles the initialization of the PDFMerger frame."""
+        self.frame = PDFMerger(None, title='PDF Merger')
+        self.SetTopWindow(self.frame)
+        self.frame.Show()
+        return True
+
+
 if __name__ == "__main__":
-    set_dpi_awareness()
+
+    # Set dpi awareness on Windows operating systems.
+    if os.name == 'nt':
+        try:
+            import ctypes
+            ctypes.oledll.shcore.SetProcessDpiAwareness(1)
+        except (AttributeError, ImportError, OSError, PermissionError):
+            pass
+
     app = PDFApp()
     app.MainLoop()
