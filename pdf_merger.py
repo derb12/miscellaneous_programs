@@ -24,6 +24,12 @@ This program is licensed under the GNU AGPL V3+ license (GNU AFFERO GPL).
 
 Attributes
 ----------
+CENTER_IMAGES_H : bool
+    If True (default) and if FULL_PAGE_IMAGES is True, then will center
+    images horizontally on the page.
+CENTER_IMAGES_V : bool
+    If True (default) and if FULL_PAGE_IMAGES is True, then will center
+    images vertically on the page.
 EXPAND_IMAGES : bool
     If True (default), will expand images to fit the size specified by
     PAGE_LAYOUT while retaining the original aspect ratio. If False, the
@@ -39,6 +45,12 @@ FONT_PATH : str or None
 FONT_SIZE : int
     The font size. Used for converting epub, html, and text files to pdf.
     Default is 11.
+FULL_PAGE_IMAGES : bool
+    If True, then images will retain their default size, or will be shrunked
+    to fit the page size. This way, smaller images can keep their size, rather
+    than being expanded to fill the page. Default is False. If True, images by
+    default will be placed in the top-left corner, but can be centered using
+    CENTER_IMAGES_H and CENTER_IMAGES_V.
 PAGE_LAYOUT : str
     A string designating the paper size to use. Must be a valid input for
     fitz.PaperSize. Default is 'letter'. Append '-l' to change the page
@@ -46,8 +58,14 @@ PAGE_LAYOUT : str
 USE_LANDSCAPE : bool
     If True, will append '-l' to PAGE_LAYOUT before passing it to fitz.PaperSize.
 
+Notes
+-----
+If both EXPAND_IMAGES and FULL_PAGE_IMAGES are False when making a pdf page from an
+image, then the pdf page will be made to fit the image, regardless of its size.
+
 """
 
+import base64
 import functools
 import io
 import os
@@ -64,12 +82,22 @@ import wx.grid
 fitz.TOOLS.mupdf_display_errors(False)
 
 
+CENTER_IMAGES_H = True
+CENTER_IMAGES_V = True
 EXPAND_IMAGES = True
 FONT = 'Helvetica'
 FONT_PATH = None
 FONT_SIZE = 11
+FULL_PAGE_IMAGES = False
 PAGE_LAYOUT = 'letter'
 USE_LANDSCAPE = False
+
+
+if Path(__file__).parent.joinpath('logo.png').is_file():
+    with Path(__file__).parent.joinpath('logo.png').open('rb') as fp:
+        LOGO = base64.encodebytes(fp.read())
+else:
+    LOGO = None
 
 
 class SettingsDialog(wx.Dialog):
@@ -97,11 +125,39 @@ class SettingsDialog(wx.Dialog):
             self, label='Note: these settings are not used\nif directly using PDF files.',
             style=wx.ALIGN_CENTER_HORIZONTAL
         )
-        sizer_1.Add(label_1, 0, wx.ALIGN_CENTER_HORIZONTAL | wx.BOTTOM, 5)
+        sizer_1.Add(label_1, 0, wx.ALIGN_CENTER_HORIZONTAL | wx.BOTTOM, 15)
 
-        self.expand_images = wx.CheckBox(self, label='Expand/shrink images to fill page')
+        self.expand_images = wx.RadioButton(
+            self, label='Expand/shrink images to fill page', style=wx.RB_GROUP
+        )
         self.expand_images.SetValue(EXPAND_IMAGES)
         sizer_1.Add(self.expand_images, 0, wx.BOTTOM | wx.TOP, 5)
+
+        self.fit_pg_image = wx.RadioButton(self, label='Fit page to image')
+        self.fit_pg_image.SetValue(not EXPAND_IMAGES and not FULL_PAGE_IMAGES)
+        sizer_1.Add(self.fit_pg_image, 0, wx.BOTTOM | wx.TOP, 5)
+
+        self.full_pg_image = wx.RadioButton(self, label='Keep image and page sizes')
+        self.full_pg_image.SetValue(FULL_PAGE_IMAGES)
+        sizer_1.Add(self.full_pg_image, 0, wx.BOTTOM | wx.TOP, 5)
+
+        self.center_images_h = wx.CheckBox(self, label='Center images horizontally')
+        sizer_1.Add(self.center_images_h, 0, wx.LEFT, 10)
+
+        self.center_images_v = wx.CheckBox(self, label='Center images vertically')
+        sizer_1.Add(self.center_images_v, 0, wx.LEFT | wx.BOTTOM, 10)
+
+        if FULL_PAGE_IMAGES:
+            self.center_images_h.SetValue(CENTER_IMAGES_H)
+            self.center_images_v.SetValue(CENTER_IMAGES_V)
+        else:
+            self.center_images_h.SetValue(False)
+            self.center_images_v.SetValue(False)
+            self.center_images_h.Enable(False)
+            self.center_images_v.Enable(False)
+
+        # filler
+        sizer_1.Add((20, 20))
 
         sizer_6 = wx.BoxSizer(wx.HORIZONTAL)
         sizer_1.Add(sizer_6, 1, wx.BOTTOM | wx.EXPAND | wx.TOP, 5)
@@ -120,6 +176,9 @@ class SettingsDialog(wx.Dialog):
         self.landscape = wx.CheckBox(self, label='Use landscape (makes width > height)')
         self.landscape.SetValue(USE_LANDSCAPE)
         sizer_1.Add(self.landscape, 0, wx.BOTTOM | wx.TOP, 5)
+
+        # filler
+        sizer_1.Add((20, 20))
 
         sizer_4 = wx.BoxSizer(wx.HORIZONTAL)
         sizer_1.Add(sizer_4, 1, wx.BOTTOM | wx.EXPAND | wx.TOP, 5)
@@ -145,7 +204,7 @@ class SettingsDialog(wx.Dialog):
         sizer_5.Add(self.font_size, 0, wx.ALIGN_CENTER_VERTICAL, 0)
 
         # filler
-        sizer_1.Add((20, 20), 0, 0, 0)
+        sizer_1.Add((20, 30))
 
         sizer_3 = wx.StdDialogButtonSizer()
         sizer_1.Add(sizer_3, 0, wx.ALIGN_RIGHT | wx.ALL, 5)
@@ -162,17 +221,35 @@ class SettingsDialog(wx.Dialog):
         self.SetSizer(main_sizer)
         main_sizer.Fit(self)
 
+        self.expand_images.Bind(wx.EVT_RADIOBUTTON, self.on_radio)
+        self.full_pg_image.Bind(wx.EVT_RADIOBUTTON, self.on_radio)
+        self.fit_pg_image.Bind(wx.EVT_RADIOBUTTON, self.on_radio)
+
+    def on_radio(self, event):
+        """Enables or disables image options depending on self.full_pg_image."""
+        checked = self.full_pg_image.GetValue()
+        self.center_images_h.SetValue(checked)
+        self.center_images_v.SetValue(checked)
+        self.center_images_h.Enable(checked)
+        self.center_images_v.Enable(checked)
+
     def set_options(self):
         """Overrides the global config variables."""
+        global CENTER_IMAGES_H
+        global CENTER_IMAGES_V
         global EXPAND_IMAGES
         global FONT
         global FONT_SIZE
+        global FULL_PAGE_IMAGES
         global PAGE_LAYOUT
         global USE_LANDSCAPE
 
+        CENTER_IMAGES_H = self.center_images_h.GetValue()
+        CENTER_IMAGES_V = self.center_images_v.GetValue()
         EXPAND_IMAGES = self.expand_images.GetValue()
         FONT = self.font.GetStringSelection()
         FONT_SIZE = self.font_size.GetValue()
+        FULL_PAGE_IMAGES = self.full_pg_image.GetValue()
         PAGE_LAYOUT = self.page_layout.GetStringSelection()
         USE_LANDSCAPE = self.landscape.GetValue()
 
@@ -358,9 +435,11 @@ class PDFMerger(wx.Frame):
         super().__init__(parent, **kwargs)
         self.SetSize(self.FromDIP((900, 500)))
         self.preview = None
+        if LOGO is not None:
+            self.SetIcon(wx.Icon(wx.Image(io.BytesIO(base64.b64decode(LOGO))).ConvertToBitmap()))
 
         self.menubar = wx.MenuBar()
-        self.options_menu = wx.Menu('Set Options', 0)
+        self.options_menu = wx.Menu('Set Options')
         self.menubar.Append(self.options_menu, "Options")
         self.SetMenuBar(self.menubar)
 
@@ -451,16 +530,15 @@ class PDFMerger(wx.Frame):
                 reset_grid = True
 
         if reset_grid:
-            self.Freeze()
             grid_data = self.grid.get_values()
             rotations = {0: '0°', -90: '-90° (left)', 90: '90° (right)', 180: '180°'}
             for row, row_data in enumerate(grid_data):
-                if re.search('.*xps|pdf', Path(row_data[0]).suffix) is None:
+                suffix = Path(row_data[0]).suffix.lower()
+                if re.search('.*xps|pdf', suffix) is None:
                     self.grid.DeleteRows(row)
                     self.grid.add_row(row_data[0], row)
-                    if is_image(row_data[0]):
+                    if is_image(suffix):
                         self.grid.SetCellValue(row, 3, rotations[row_data[3]])
-            self.Thaw()
         event.Skip()
 
     def on_add(self, event):
@@ -757,7 +835,7 @@ def get_pdf(file_name, finalize=False):
         return fitz.Document(file_name)
     elif re.search('.*xps|epub|htm.*', suffix) is not None:
         return document_to_pdf(file_name, finalize)
-    elif is_image(file_name):
+    elif is_image(suffix):
         return image_to_pdf(file_name)
     else:
         return text_to_pdf(file_name)
@@ -883,39 +961,57 @@ def image_to_pdf(file_name):
 
     """
     path = Path(file_name)
-    width, height = fitz.PaperSize(get_page_layout())
     stream = None
     with fitz.Document(str(path)) as doc:
         image_rect = doc[0].rect
-        if not EXPAND_IMAGES:
-            width, height = image_rect.width, image_rect.height
-        elif ((image_rect.width > image_rect.height and width < height)
-                or (image_rect.width < image_rect.height and width > height)):
-            width, height = height, width
-
         if 'svg' in path.suffix:
             # have to convert svg to pdf since pymupdf cannot use svg as a Pixmap
             stream = doc.convert_to_pdf()
 
+    if EXPAND_IMAGES or FULL_PAGE_IMAGES:
+        width, height = fitz.PaperSize(get_page_layout())
+    else:
+        width, height = image_rect.width, image_rect.height
+
     pdf = fitz.Document()
     page = pdf.new_page(width=width, height=height)
+
+    if EXPAND_IMAGES:
+        rect = page.rect
+    elif not FULL_PAGE_IMAGES:
+        rect = image_rect
+    else:
+        if image_rect.width > image_rect.height:
+            rect_width = min(image_rect.width, page.rect.width)
+            rect_height = (rect_width / image_rect.width) * image_rect.height
+        else:
+            rect_height = min(image_rect.height, page.rect.height)
+            rect_width = (rect_height / image_rect.height) * image_rect.width
+
+        rect = fitz.Rect(0, 0, rect_width, rect_height)
+        if CENTER_IMAGES_H:
+            rect += ((page.rect.width - rect_width) / 2, 0, (page.rect.width - rect_width) / 2, 0)
+        if CENTER_IMAGES_V:
+            rect += (0, (page.rect.height - rect_height) / 2, 0, (page.rect.height - rect_height) / 2)
+
     if stream is not None:
         with fitz.Document(filetype='pdf', stream=stream) as image_pdf:
-            page.show_pdf_page(page.rect, image_pdf, 0)
+            page.show_pdf_page(rect, image_pdf, 0)
     else:
-        page.insert_image(page.rect, filename=str(path))
+        page.insert_image(rect, filename=str(path))
 
     return pdf
 
 
-def is_image(file_name):
+def is_image(file_suffix):
     """
     Determines if the file is a supported image file for pymupdf.
 
     Parameters
     ----------
-    file_name : str or os.Pathlike
-        The file path for the document.
+    file_suffix : str
+        The file extension for the document (eg. 'jpg', 'pdf'). Does not matter
+        if preceeded by a period (ie. '.jpg' and 'jpg' are both recognized).
 
     Returns
     -------
@@ -928,7 +1024,7 @@ def is_image(file_name):
     Supported extensions are jpg/jpeg/jpx, png, tif/tiff, svg, gif, and bmp.
 
     """
-    return re.search('jp.*|png|tif.*|svg|gif|bmp', Path(file_name).suffix) is not None
+    return re.search('jp.*|png|tif.*|svg|gif|bmp', file_suffix) is not None
 
 
 class PDFViewer(wx.Frame):
@@ -955,6 +1051,9 @@ class PDFViewer(wx.Frame):
         self._total_pages = len(self.pdf)
         self._last_v_scroll = -1  # used to track vertical scrolling
         self._redraw = False
+
+        if LOGO is not None:
+            self.SetIcon(wx.Icon(wx.Image(io.BytesIO(base64.b64decode(LOGO))).ConvertToBitmap()))
 
         self.main_panel = wx.Panel(self)
         sizer_1 = wx.BoxSizer(wx.VERTICAL)
@@ -1019,7 +1118,6 @@ class PDFViewer(wx.Frame):
         self.tool_panel.SetSizer(sizer_2)
 
         self.display_panel = wx.ScrolledWindow(self.main_panel, style=wx.BORDER_SUNKEN)
-        self.display_panel.SetBackgroundColour('#959595')
         self.display_panel.SetScrollRate(20, 20)
         # use double buffer to prevent flickering when
         # moving between pages or scrolling on a page
