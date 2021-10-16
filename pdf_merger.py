@@ -9,6 +9,21 @@ and allows previewing the merged file before saving.
 
 @author: Donald Erb
 Created on 2021-02-04
+Copyright (C) 2020  Donald Erb
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as published
+by the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU Affero General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
+(See LICENSE.txt in this repository)
 
 Requirements
 ------------
@@ -18,9 +33,20 @@ fitz>=1.18.4
 wx>=4.0
     wx is wxpython; v4.0 is the first to work with python v3.
 
+To install:
+
+    pip install pymupdf>=1.18.4 wxPython>4.0
+
 License
 -------
 This program is licensed under the GNU AGPL V3+ license (GNU AFFERO GPL).
+
+History
+-------
+2021-10-16, Donald Erb
+Added SAFE_SAVE attribute to allow saving with the default values,
+in case the default saving options cause issues viewing the output
+pdf.
 
 Attributes
 ----------
@@ -57,6 +83,16 @@ PAGE_LAYOUT : str
     orientation.
 USE_LANDSCAPE : bool
     If True, will append '-l' to PAGE_LAYOUT before passing it to fitz.PaperSize.
+SAFE_SAVE : bool
+    If True, will use the default options when saving, which do not compression
+    or cleaning of the file. If False (default), will use the following options
+    when saving:
+
+        garbage=4, deflate=1
+
+    Included since the more aggressive garbage collection used when SAFE_SAVE is False
+    can sometimes cause issues when viewing the pdfs in Adobe (although the pdfs are fine
+    when using other software like Chrome or Firefox to view the pdfs).
 
 Notes
 -----
@@ -91,6 +127,7 @@ FONT_SIZE = 11
 FULL_PAGE_IMAGES = False
 PAGE_LAYOUT = 'letter'
 USE_LANDSCAPE = False
+SAFE_SAVE = False
 
 
 if Path(__file__).parent.joinpath('logo.png').is_file():
@@ -177,6 +214,10 @@ class SettingsDialog(wx.Dialog):
         self.landscape.SetValue(USE_LANDSCAPE)
         sizer_1.Add(self.landscape, 0, wx.BOTTOM | wx.TOP, 5)
 
+        self.safe_save = wx.CheckBox(self, label='Safe Save? Check if the output files have issues')
+        self.safe_save.SetValue(SAFE_SAVE)
+        sizer_1.Add(self.safe_save, 0, wx.BOTTOM | wx.TOP, 5)
+
         # filler
         sizer_1.Add((20, 20))
 
@@ -243,6 +284,7 @@ class SettingsDialog(wx.Dialog):
         global FULL_PAGE_IMAGES
         global PAGE_LAYOUT
         global USE_LANDSCAPE
+        global SAFE_SAVE
 
         CENTER_IMAGES_H = self.center_images_h.GetValue()
         CENTER_IMAGES_V = self.center_images_v.GetValue()
@@ -252,6 +294,7 @@ class SettingsDialog(wx.Dialog):
         FULL_PAGE_IMAGES = self.full_pg_image.GetValue()
         PAGE_LAYOUT = self.page_layout.GetStringSelection()
         USE_LANDSCAPE = self.landscape.GetValue()
+        SAFE_SAVE = self.safe_save.GetValue()
 
 
 class PagesGrid(wx.grid.Grid):
@@ -336,7 +379,8 @@ class PagesGrid(wx.grid.Grid):
             self.InsertRows(row)
         self.create_row(row, file_path, pages)
 
-    def create_row(self, row, file_path, total_pages, first_page='1', last_page=None, rotation=None):
+    def create_row(self, row, file_path, total_pages, first_page='1',
+                   last_page=None, rotation=None):
         """
         Adds data about a pdf file to a row in the grid.
 
@@ -655,7 +699,11 @@ class PDFMerger(wx.Frame):
                 raise ValueError('The output pdf has no pages.')
             # note: garbate > 2 will merge the same objects, which can cause issues viewing
             # the pdf with Adobe (although the pdf can still be viewed with other software)
-            output_pdf.save(output_path, garbage=4, deflate=1)
+            if SAFE_SAVE:
+                save_options = {}
+            else:
+                save_options = {'garbage': 4, 'deflate': 1}
+            output_pdf.save(output_path, **save_options)
         except Exception:
             with wx.MessageDialog(
                 self, f'Could not save file\n\n    {traceback.format_exc()}',
@@ -992,7 +1040,9 @@ def image_to_pdf(file_name):
         if CENTER_IMAGES_H:
             rect += ((page.rect.width - rect_width) / 2, 0, (page.rect.width - rect_width) / 2, 0)
         if CENTER_IMAGES_V:
-            rect += (0, (page.rect.height - rect_height) / 2, 0, (page.rect.height - rect_height) / 2)
+            rect += (
+                0, (page.rect.height - rect_height) / 2, 0, (page.rect.height - rect_height) / 2
+            )
 
     if stream is not None:
         with fitz.Document(filetype='pdf', stream=stream) as image_pdf:
