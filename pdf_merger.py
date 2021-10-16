@@ -137,6 +137,13 @@ else:
     LOGO = None
 
 
+# paper_sizes function replaced the paperSizes dictionary in a fitz version > 1.18.4
+try:
+    PAPER_SIZES = fitz.paper_sizes()
+except AttributeError:
+    PAPER_SIZES = fitz.paperSizes
+
+
 class SettingsDialog(wx.Dialog):
     """
     Allows changing the default settings for page configuration.
@@ -201,9 +208,9 @@ class SettingsDialog(wx.Dialog):
         label_4 = wx.StaticText(self, label='Page Layout')
         sizer_6.Add(label_4, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 10)
 
-        paper_sizes = list(fitz.paperSizes.keys())
+        paper_sizes = list(PAPER_SIZES.keys())
         self.page_layout = wx.Choice(self, wx.ID_ANY, choices=paper_sizes)
-        if PAGE_LAYOUT in fitz.paperSizes:
+        if PAGE_LAYOUT in PAPER_SIZES:
             selection = paper_sizes.index(PAGE_LAYOUT)
         else:
             selection = paper_sizes.index('letter')
